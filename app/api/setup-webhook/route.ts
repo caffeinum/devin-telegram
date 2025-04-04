@@ -1,7 +1,8 @@
 import type { NextRequest } from "next/server"
 
 export async function GET(request: NextRequest) {
-  const url = `${request.nextUrl.origin}/api/telegram`
+  const origin = request.headers.get("x-forwarded-host")
+  const url = `https://${origin}/api/telegram`
 
   if (!url) {
     return Response.json({ ok: false, description: "URL parameter is required" }, { status: 400 })
