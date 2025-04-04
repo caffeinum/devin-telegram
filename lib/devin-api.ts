@@ -18,7 +18,7 @@ interface SessionDetails {
   snapshot_id: string | null
   playbook_id: string | null
   pull_request: { url: string } | null
-  structured_output: any | null
+  structured_output: Record<string, unknown> | null
   status_enum: "RUNNING" | "blocked" | "stopped" | null
 }
 
