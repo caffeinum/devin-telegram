@@ -1,6 +1,6 @@
 import type { Context } from "grammy"
-import { createDevinSession, getDevinSessionDetails, sendMessageToDevinSession } from "../../lib/devin-api"
-import { sessionStore } from "../../lib/session-store"
+import { createDevinSession, getDevinSessionDetails, sendMessageToDevinSession, getAllDevinSessions } from "../../lib/devin-api"
+import { sessionStore } from "../../lib/redis-session-store"
 
 // Handle text messages
 export async function handleTextMessage(ctx: Context): Promise<void> {
@@ -13,11 +13,11 @@ export async function handleTextMessage(ctx: Context): Promise<void> {
 
   try {
     // Check if user has an active session
-    if (!sessionStore.hasActiveSession(userId)) {
+    if (!(await sessionStore.hasActiveSession(userId))) {
       await createNewSession(ctx, userId, messageText)
     } else {
       // Get the existing session
-      const userSession = sessionStore.getSession(userId)
+      const userSession = await sessionStore.getSession(userId)
 
       if (!userSession) {
         return
@@ -27,7 +27,7 @@ export async function handleTextMessage(ctx: Context): Promise<void> {
       await sendMessageToDevinSession(userSession.devinSessionId, messageText)
 
       // Update the last interaction time
-      sessionStore.setSession(userId, {
+      await sessionStore.setSession(userId, {
         ...userSession,
         lastInteractionTime: new Date(),
       })
@@ -67,12 +67,9 @@ async function createNewSession(ctx: Context, userId: number, prompt: string): P
     await ctx.reply(
       `🚀 Session created!\n\n` +
         `🔗 View in browser: ${session.url}\n\n` +
-        `Devin is now processing your request. I'll update you when there's progress.\n\n` +
+        `Devin is now processing your request.\n\n` +
         `Use /status to check the current status or /help for more commands.`,
     )
-
-    // Start polling for updates
-    pollSessionUpdates(ctx, userId, session.session_id)
   } catch (error) {
     console.error("Error creating session:", error)
     await ctx.reply(
@@ -144,67 +141,64 @@ function formatStructuredOutput(output: any): string {
   }
 }
 
-// Poll for session updates
-async function pollSessionUpdates(ctx: Context, userId: number, sessionId: string): Promise<void> {
-  let lastStatus: string | null = null
-  let lastOutput: any = null
-
-  const intervalId = setInterval(async () => {
-    try {
-      // Check if the user still has an active session
-      const userSession = sessionStore.getSession(userId)
-      if (!userSession || userSession.devinSessionId !== sessionId) {
-        clearInterval(intervalId)
-        return
-      }
-
-      // Get the session details
-      const sessionDetails = await getDevinSessionDetails(sessionId)
-
-      // Check if the status has changed
-      if (sessionDetails.status !== lastStatus) {
-        lastStatus = sessionDetails.status
-
-        // Send a status update
-        await ctx.reply(`📊 Status update: ${sessionDetails.status}`)
-
-        // If the session is no longer running, stop polling
-        if (sessionDetails.status_enum !== "RUNNING") {
-          clearInterval(intervalId)
-
-          // Send a final message
-          if (sessionDetails.status_enum === "stopped") {
-            await ctx.reply(
-              `✅ Session completed!\n\n` +
-                `🔗 View results: ${userSession.devinSessionUrl}\n\n` +
-                `To start a new session, use /new or just send a new message.`,
-            )
-          } else if (sessionDetails.status_enum === "blocked") {
-            await ctx.reply(
-              `⚠️ Devin needs your input!\n\n` +
-                `🔗 Please check the session: ${userSession.devinSessionUrl}\n\n` +
-                `Or send a message here with your response.`,
-            )
-          }
-        }
-      }
-
-      // Check if there's new structured output
-      if (
-        sessionDetails.structured_output &&
-        JSON.stringify(sessionDetails.structured_output) !== JSON.stringify(lastOutput)
-      ) {
-        lastOutput = sessionDetails.structured_output
-
-        // Format and send the structured output
-        const formattedOutput = formatStructuredOutput(sessionDetails.structured_output)
-        await ctx.reply(`📝 Update from Devin:\n\n${formattedOutput}`)
-      }
-    } catch (error) {
-      console.error("Error polling session updates:", error)
-      clearInterval(intervalId)
+async function getSessionStatusUpdate(ctx: Context, userId: number, sessionId: string): Promise<void> {
+  try {
+    const { sessions } = await getAllDevinSessions()
+    const userSession = await sessionStore.getSession(userId)
+    
+    if (!userSession) {
+      return
     }
-  }, 10000) // Poll every 10 seconds
+
+    const sessionDetails = sessions.find(session => session.session_id === sessionId)
+    
+    if (!sessionDetails) {
+      throw new Error(`Session ${sessionId} not found in the list of sessions`)
+    }
+
+    // Format the last interaction time
+    const lastInteraction = new Date(userSession.lastInteractionTime)
+    const timeAgo = getTimeAgo(lastInteraction)
+
+    const recentSessions = sessions
+      .filter(session => session.session_id !== sessionId)
+      .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+      .slice(0, 3)
+
+    let statusMessage = `📊 Session Status\n\n` +
+      `ID: ${userSession.devinSessionId}\n` +
+      `Status: ${sessionDetails.status}\n` +
+      `Last interaction: ${timeAgo}\n` +
+      `Created: ${new Date(sessionDetails.created_at).toLocaleString()}\n\n` +
+      `🔗 View in browser: ${userSession.devinSessionUrl}\n\n`;
+
+    if (sessionDetails.structured_output) {
+      statusMessage += `📝 Latest output:\n\n${formatStructuredOutput(sessionDetails.structured_output)}`;
+    } else {
+      statusMessage += "No structured output available yet.";
+    }
+
+    if (sessionDetails.status_enum === "stopped") {
+      statusMessage += `\n\n✅ Session completed! To start a new session, use /new or just send a new message.`;
+    } else if (sessionDetails.status_enum === "blocked") {
+      statusMessage += `\n\n⚠️ Devin needs your input! Please check the session in browser or send a message here with your response.`;
+    }
+
+    if (recentSessions.length > 0) {
+      statusMessage += `\n\n📋 Recent Sessions:\n`;
+      recentSessions.forEach((session, index) => {
+        statusMessage += `${index + 1}. ${session.title || 'Untitled'} (${session.status_enum}) - ${new Date(session.created_at).toLocaleString()}\n`;
+      });
+    }
+
+    await ctx.reply(statusMessage);
+  } catch (error) {
+    console.error("Error getting session status:", error);
+    await ctx.reply(
+      "❌ Failed to get session status. The session might have expired.\n\n" +
+      "You can use /reset to start a new session."
+    );
+  }
 }
 
 // Handle the /start command
@@ -243,43 +237,17 @@ export async function handleStatusCommand(ctx: Context): Promise<void> {
     return
   }
 
-  if (!sessionStore.hasActiveSession(userId)) {
+  if (!(await sessionStore.hasActiveSession(userId))) {
     await ctx.reply("❌ You don't have an active session.\n\n" + "Send a message to create a new Devin session.")
     return
   }
 
-  const userSession = sessionStore.getSession(userId)
+  const userSession = await sessionStore.getSession(userId)
   if (!userSession) {
     return
   }
 
-  try {
-    // Get the session details
-    const sessionDetails = await getDevinSessionDetails(userSession.devinSessionId)
-
-    // Format the last interaction time
-    const lastInteraction = new Date(userSession.lastInteractionTime)
-    const timeAgo = getTimeAgo(lastInteraction)
-
-    // Send the status
-    await ctx.reply(
-      `📊 Session Status\n\n` +
-        `ID: ${userSession.devinSessionId}\n` +
-        `Status: ${sessionDetails.status}\n` +
-        `Last interaction: ${timeAgo}\n` +
-        `Created: ${new Date(sessionDetails.created_at).toLocaleString()}\n\n` +
-        `🔗 View in browser: ${userSession.devinSessionUrl}\n\n` +
-        (sessionDetails.structured_output
-          ? `📝 Latest output:\n\n${formatStructuredOutput(sessionDetails.structured_output)}`
-          : "No structured output available yet."),
-    )
-  } catch (error) {
-    console.error("Error getting session status:", error)
-    await ctx.reply(
-      "❌ Failed to get session status. The session might have expired.\n\n" +
-        "You can use /reset to start a new session.",
-    )
-  }
+  await getSessionStatusUpdate(ctx, userId, userSession.devinSessionId)
 }
 
 // Handle the /new command
@@ -291,8 +259,8 @@ export async function handleNewCommand(ctx: Context): Promise<void> {
   }
 
   // Clear any existing session
-  if (sessionStore.hasActiveSession(userId)) {
-    sessionStore.removeSession(userId)
+  if (await sessionStore.hasActiveSession(userId)) {
+    await sessionStore.removeSession(userId)
   }
 
   await ctx.reply(
@@ -308,8 +276,8 @@ export async function handleResetCommand(ctx: Context): Promise<void> {
     return
   }
 
-  if (sessionStore.hasActiveSession(userId)) {
-    sessionStore.removeSession(userId)
+  if (await sessionStore.hasActiveSession(userId)) {
+    await sessionStore.removeSession(userId)
     await ctx.reply(
       "🔄 Your session has been reset.\n\n" + "You can start a new conversation with Devin by sending a message.",
     )

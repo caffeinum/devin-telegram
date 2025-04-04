@@ -22,6 +22,10 @@ interface SessionDetails {
   status_enum: "RUNNING" | "blocked" | "stopped" | null
 }
 
+interface ListSessionsResponse {
+  sessions: SessionDetails[]
+}
+
 // Create a new Devin session
 export async function createDevinSession(prompt: string): Promise<CreateSessionResponse> {
   const response = await fetch(`${DEVIN_API_BASE_URL}/sessions`, {
@@ -99,5 +103,21 @@ export async function uploadFileToDevin(file: File | Blob): Promise<string> {
   }
 
   return await response.text()
+}
+
+export async function getAllDevinSessions(limit: number = 100, offset: number = 0): Promise<ListSessionsResponse> {
+  const response = await fetch(`${DEVIN_API_BASE_URL}/sessions?limit=${limit}&offset=${offset}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${process.env.DEVIN_API_KEY}`,
+    },
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    throw new Error(`Failed to get Devin sessions: ${response.status} ${errorText}`)
+  }
+
+  return await response.json()
 }
 
