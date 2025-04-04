@@ -2,6 +2,19 @@ import type { Context } from "grammy"
 import { createDevinSession, getDevinSessionDetails, sendMessageToDevinSession, getAllDevinSessions } from "../../lib/devin-api"
 import { sessionStore } from "../../lib/redis-session-store"
 
+interface SessionDetails {
+  session_id: string
+  status: string
+  title: string | null
+  created_at: string
+  updated_at: string
+  snapshot_id: string | null
+  playbook_id: string | null
+  pull_request: { url: string } | null
+  structured_output: Record<string, unknown> | null
+  status_enum: "RUNNING" | "blocked" | "stopped" | null
+}
+
 // Handle text messages
 export async function handleTextMessage(ctx: Context): Promise<void> {
   const userId = ctx.from?.id
@@ -237,17 +250,19 @@ export async function handleStatusCommand(ctx: Context): Promise<void> {
     return
   }
 
-  if (!(await sessionStore.hasActiveSession(userId))) {
-    await ctx.reply("❌ You don't have an active session.\n\n" + "Send a message to create a new Devin session.")
-    return
+  try {
+    const { sessions } = await getAllDevinSessions()
+    
+    if (sessions.length === 0) {
+      await ctx.reply("❌ You don't have any active sessions.\n\n" + "Send a message to create a new Devin session.")
+      return
+    }
+    
+    await displaySessionsFromAPI(ctx, sessions)
+  } catch (error) {
+    console.error("Error getting sessions:", error)
+    await ctx.reply("❌ Failed to get session status. Please try again later.")
   }
-
-  const userSession = await sessionStore.getSession(userId)
-  if (!userSession) {
-    return
-  }
-
-  await getSessionStatusUpdate(ctx, userId, userSession.devinSessionId)
 }
 
 // Handle the /new command
@@ -308,5 +323,38 @@ function getTimeAgo(date: Date): string {
 
   const diffDay = Math.floor(diffHour / 24)
   return `${diffDay} day${diffDay === 1 ? "" : "s"} ago`
+}
+async function displaySessionsFromAPI(ctx: Context, sessions: SessionDetails[]): Promise<void> {
+  const sortedSessions = sessions
+    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+
+  const mostRecentSession = sortedSessions[0]
+  
+  let statusMessage = `📊 Active Sessions\n\n`
+
+  statusMessage += `Most Recent Session:\n` +
+    `ID: ${mostRecentSession.session_id}\n` +
+    `Status: ${mostRecentSession.status}\n` +
+    `Title: ${mostRecentSession.title || 'Untitled'}\n` +
+    `Created: ${new Date(mostRecentSession.created_at).toLocaleString()}\n` +
+    `Updated: ${new Date(mostRecentSession.updated_at).toLocaleString()}\n\n`
+  
+  try {
+    const userSession = await sessionStore.getSession(ctx.from?.id || 0)
+    if (userSession && userSession.devinSessionId === mostRecentSession.session_id) {
+      statusMessage += `🔗 View in browser: ${userSession.devinSessionUrl}\n\n`
+    }
+  } catch (error) {
+    console.error("Error getting session URL from Redis:", error)
+  }
+  
+  if (sortedSessions.length > 1) {
+    statusMessage += `📋 Other Active Sessions:\n`
+    sortedSessions.slice(1, 5).forEach((session, index) => {
+      statusMessage += `${index + 1}. ${session.title || 'Untitled'} (${session.status_enum}) - ${new Date(session.created_at).toLocaleString()}\n`
+    })
+  }
+
+  await ctx.reply(statusMessage)
 }
 
