@@ -1,5 +1,5 @@
 import type { Context } from "grammy"
-import { createDevinSession, getDevinSessionDetails, sendMessageToDevinSession } from "../../lib/devin-api"
+import { createDevinSession, getDevinSessionDetails, sendMessageToDevinSession, getAllDevinSessions } from "../../lib/devin-api"
 import { sessionStore } from "../../lib/redis-session-store"
 
 // Handle text messages
@@ -143,17 +143,27 @@ function formatStructuredOutput(output: any): string {
 
 async function getSessionStatusUpdate(ctx: Context, userId: number, sessionId: string): Promise<void> {
   try {
-    // Get the session details
-    const sessionDetails = await getDevinSessionDetails(sessionId)
+    const { sessions } = await getAllDevinSessions()
     const userSession = await sessionStore.getSession(userId)
     
     if (!userSession) {
       return
     }
 
+    const sessionDetails = sessions.find(session => session.session_id === sessionId)
+    
+    if (!sessionDetails) {
+      throw new Error(`Session ${sessionId} not found in the list of sessions`)
+    }
+
     // Format the last interaction time
     const lastInteraction = new Date(userSession.lastInteractionTime)
     const timeAgo = getTimeAgo(lastInteraction)
+
+    const recentSessions = sessions
+      .filter(session => session.session_id !== sessionId)
+      .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+      .slice(0, 3)
 
     let statusMessage = `📊 Session Status\n\n` +
       `ID: ${userSession.devinSessionId}\n` +
@@ -172,6 +182,13 @@ async function getSessionStatusUpdate(ctx: Context, userId: number, sessionId: s
       statusMessage += `\n\n✅ Session completed! To start a new session, use /new or just send a new message.`;
     } else if (sessionDetails.status_enum === "blocked") {
       statusMessage += `\n\n⚠️ Devin needs your input! Please check the session in browser or send a message here with your response.`;
+    }
+
+    if (recentSessions.length > 0) {
+      statusMessage += `\n\n📋 Recent Sessions:\n`;
+      recentSessions.forEach((session, index) => {
+        statusMessage += `${index + 1}. ${session.title || 'Untitled'} (${session.status_enum}) - ${new Date(session.created_at).toLocaleString()}\n`;
+      });
     }
 
     await ctx.reply(statusMessage);
