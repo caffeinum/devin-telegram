@@ -1,6 +1,6 @@
 import type { Context } from "grammy"
 import { createDevinSession, getDevinSessionDetails, sendMessageToDevinSession } from "../../lib/devin-api"
-import { sessionStore } from "../../lib/session-store"
+import { sessionStore } from "../../lib/redis-session-store"
 
 // Handle text messages
 export async function handleTextMessage(ctx: Context): Promise<void> {
@@ -13,11 +13,11 @@ export async function handleTextMessage(ctx: Context): Promise<void> {
 
   try {
     // Check if user has an active session
-    if (!sessionStore.hasActiveSession(userId)) {
+    if (!(await sessionStore.hasActiveSession(userId))) {
       await createNewSession(ctx, userId, messageText)
     } else {
       // Get the existing session
-      const userSession = sessionStore.getSession(userId)
+      const userSession = await sessionStore.getSession(userId)
 
       if (!userSession) {
         return
@@ -27,7 +27,7 @@ export async function handleTextMessage(ctx: Context): Promise<void> {
       await sendMessageToDevinSession(userSession.devinSessionId, messageText)
 
       // Update the last interaction time
-      sessionStore.setSession(userId, {
+      await sessionStore.setSession(userId, {
         ...userSession,
         lastInteractionTime: new Date(),
       })
@@ -152,7 +152,7 @@ async function pollSessionUpdates(ctx: Context, userId: number, sessionId: strin
   const intervalId = setInterval(async () => {
     try {
       // Check if the user still has an active session
-      const userSession = sessionStore.getSession(userId)
+      const userSession = await sessionStore.getSession(userId)
       if (!userSession || userSession.devinSessionId !== sessionId) {
         clearInterval(intervalId)
         return
@@ -243,12 +243,12 @@ export async function handleStatusCommand(ctx: Context): Promise<void> {
     return
   }
 
-  if (!sessionStore.hasActiveSession(userId)) {
+  if (!(await sessionStore.hasActiveSession(userId))) {
     await ctx.reply("❌ You don't have an active session.\n\n" + "Send a message to create a new Devin session.")
     return
   }
 
-  const userSession = sessionStore.getSession(userId)
+  const userSession = await sessionStore.getSession(userId)
   if (!userSession) {
     return
   }
@@ -291,8 +291,8 @@ export async function handleNewCommand(ctx: Context): Promise<void> {
   }
 
   // Clear any existing session
-  if (sessionStore.hasActiveSession(userId)) {
-    sessionStore.removeSession(userId)
+  if (await sessionStore.hasActiveSession(userId)) {
+    await sessionStore.removeSession(userId)
   }
 
   await ctx.reply(
@@ -308,8 +308,8 @@ export async function handleResetCommand(ctx: Context): Promise<void> {
     return
   }
 
-  if (sessionStore.hasActiveSession(userId)) {
-    sessionStore.removeSession(userId)
+  if (await sessionStore.hasActiveSession(userId)) {
+    await sessionStore.removeSession(userId)
     await ctx.reply(
       "🔄 Your session has been reset.\n\n" + "You can start a new conversation with Devin by sending a message.",
     )
